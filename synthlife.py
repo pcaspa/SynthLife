@@ -75,7 +75,7 @@ horizontal_gap_end_x = 0
 MAX_LIFEFORMS_PER_TYPE = 50
 
 # Define a counter for the number of games played
-games_played = 0
+games_played = -1
 
 # Mutation rate for offspring
 #MUTATION_RATE = 0.1
@@ -803,7 +803,7 @@ def determine_quarter(position):
         return None  # Undefined
 
 # Function to draw boundaries with gaps
-def draw_boundary_with_gap(surface, width, height, header_height, gap_ratio=0.3, line_color=(200, 200, 200), line_width=2):
+def draw_boundary_with_gap(surface, width, height, header_height, gap_ratio=0.4, line_color=(200, 200, 200), line_width=2):
     global vertical_gap_start_y, vertical_gap_end_y, horizontal_gap_start_x, horizontal_gap_end_x
 
     # Vertical Boundary
