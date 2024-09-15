@@ -3,6 +3,9 @@ import random
 import math
 from collections import Counter
 import copy
+import csv
+import json
+import os
 
 # Initialize Pygame
 pygame.init()
@@ -45,7 +48,7 @@ BACKGROUND_COLOR = (30, 30, 30)
 NUM_PLANTS = 200
 MAX_PLANTS = 200
 NUM_EACH_LIFE_FORM = 10
-PLANT_RESPAWN_TIME = 500
+PLANT_RESPAWN_TIME = 250
 
 # Grouping Behavior Parameters
 GROUPING_RADIUS = 100
@@ -75,7 +78,15 @@ MAX_LIFEFORMS_PER_TYPE = 50
 games_played = 0
 
 # Mutation rate for offspring
-MUTATION_RATE = 0.1
+#MUTATION_RATE = 0.1
+
+# Define maximum energy for LifeForms
+MAX_ENERGY = 500  # *** Added: Maximum energy cap ***
+
+# Initialize last winner variables
+last_winner_type = None
+consecutive_wins = 0
+last_winning_parameters = None
 
 # Define Plant class
 class Plant(pygame.sprite.Sprite):
@@ -175,27 +186,53 @@ class LifeForm(pygame.sprite.Sprite):
         # Generate random symmetrical pixels
         pixels = []
         positions = set()
-        num_pixels = 10  # Total number of pixels in the life form
+        num_pixels = 16  # Total number of pixels in the life form
+
+        # Attribute pixel counters to enforce the maximum of 5 pixels per attribute
+        attribute_pixel_counts = {attr: 0 for attr in ATTRIBUTE_COLORS.keys()}
+        max_pixels_per_attribute = 5
+
         while len(pixels) < num_pixels:
             x = random.randint(-2, 2)
             y = random.randint(-2, 2)
+
             if (x, y) not in positions:
-                color = random.choice(list(ATTRIBUTE_COLORS.values()))
+                # Select a random attribute color with the constraint of max 5 pixels per attribute
+                available_colors = [
+                    color for attr, color in ATTRIBUTE_COLORS.items()
+                    if attribute_pixel_counts[attr] < max_pixels_per_attribute
+                ]
+                if not available_colors:
+                    break  # This should never happen but ensures safety
+
+                color = random.choice(available_colors)
+                attribute = COLOR_TO_ATTRIBUTE[color]
                 pixels.append((x, y, color))
                 positions.add((x, y))
-                # Add symmetrical counterpart
+                attribute_pixel_counts[attribute] += 1
+
+                # Add symmetrical counterpart if within bounds and within the 5x5 grid
                 if x != 0 or y != 0:
                     sym_x, sym_y = -x, y
-                    if (sym_x, sym_y) not in positions and len(pixels) < num_pixels:
+                    if (
+                        (sym_x, sym_y) not in positions
+                        and len(pixels) < num_pixels
+                        and -2 <= sym_x <= 2
+                        and -2 <= sym_y <= 2
+                    ):
                         pixels.append((sym_x, sym_y, color))
                         positions.add((sym_x, sym_y))
+                        attribute_pixel_counts[attribute] += 1
+
         # Ensure we have exactly num_pixels pixels
-        pixels = pixels[:num_pixels]
+        if len(pixels) > num_pixels:
+            pixels = pixels[:num_pixels]
+
         return pixels
 
     def update_attributes(self):
         # Count the number of pixels of each color
-        color_counts = Counter([color for _, _, color in self.pixels])
+        color_counts = Counter([tuple(color) for _, _, color in self.pixels])
         # Initialize attributes
         self.attributes = dict.fromkeys(ATTRIBUTE_COLORS.keys(), 0)
         # Update attributes based on pixel counts
@@ -234,7 +271,7 @@ class LifeForm(pygame.sprite.Sprite):
             return
 
         # Energy depletion over time
-        metabolism = self.attributes['metabolism_rate'] or 1
+        metabolism = round((5 - self.attributes.get('metabolism_rate', 0)) / 2.5)
         self.energy -= 0.05 * metabolism
 
         # If energy runs out, die
@@ -464,6 +501,9 @@ class LifeForm(pygame.sprite.Sprite):
     def interact_with_target(self):
         if isinstance(self.target, Plant):
             self.energy += self.target.energy
+            # *** Enforce the maximum energy cap ***
+            if self.energy > MAX_ENERGY:
+                self.energy = MAX_ENERGY
             self.target.kill()
             self.target = None
         elif isinstance(self.target, LifeForm):
@@ -540,26 +580,76 @@ class LifeForm(pygame.sprite.Sprite):
         # Offspring inherit the same pixels with possible mutation
         new_pixels = copy.deepcopy(self.pixels)
         # Introduce mutation
-        if random.random() < MUTATION_RATE:
-            index = random.randint(0, len(new_pixels) - 1)
-            new_color = random.choice(list(ATTRIBUTE_COLORS.values()))
-            new_pixels[index] = (new_pixels[index][0], new_pixels[index][1], new_color)
-            self.image_cached = False  # Invalidate cache if mutation occurs
+        #if random.random() < MUTATION_RATE:
+        #    index = random.randint(0, len(new_pixels) - 1)
+        #    new_color = random.choice(list(ATTRIBUTE_COLORS.values()))
+        #    new_pixels[index] = (new_pixels[index][0], new_pixels[index][1], new_color)
+        #    self.image_cached = False  # Invalidate cache if mutation occurs
         offspring = LifeForm(
             life_type=self.life_type,
             position=self.position.copy(),
             pixels=new_pixels
         )
-        offspring.energy = energy_contribution
+        # *** Ensure offspring's energy does not exceed MAX_ENERGY ***
+        offspring.energy = min(energy_contribution, MAX_ENERGY)
         offspring.direction = random.uniform(0, 2 * math.pi)
         offspring.update_attributes()
         offspring.create_image()
         offspring.reproduction_cooldown = 0
         return offspring
 
+# Function to load last winning parameters from CSV
+def load_last_winning_parameters():
+    import json
+    if os.path.exists('winning_parameters.csv'):
+        with open('winning_parameters.csv', 'r', newline='') as csvfile:
+            reader = csv.DictReader(csvfile)
+            rows = list(reader)
+            if rows:
+                last_row = rows[-1]
+                life_type = last_row['life_type']
+                # Parse attributes
+                attributes = {}
+                for attr in ATTRIBUTE_COLORS.keys():
+                    attributes[attr] = int(last_row.get(attr, 0))
+                # Parse pixels
+                pixels_json = last_row.get('pixels', '[]')
+                pixels = json.loads(pixels_json)
+                # Convert colors from lists to tuples
+                pixels = [(x, y, tuple(color)) for x, y, color in pixels]
+                # Compute consecutive_wins
+                consecutive_wins = 1
+                for row in reversed(rows[:-1]):
+                    if row['life_type'] == life_type:
+                        consecutive_wins += 1
+                    else:
+                        break
+                return life_type, {'pixels': pixels, 'attributes': attributes}, consecutive_wins
+    return None, None, 0
+
+# Function to append winning parameters to CSV
+def append_winning_parameters(winner_type, winning_parameters):
+    import json
+    file_exists = os.path.exists('winning_parameters.csv')
+    with open('winning_parameters.csv', 'a', newline='') as csvfile:
+        fieldnames = ['life_type', 'pixels'] + list(ATTRIBUTE_COLORS.keys())
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        row = {'life_type': winner_type}
+        attributes = winning_parameters['attributes']
+        for attr in ATTRIBUTE_COLORS.keys():
+            row[attr] = attributes.get(attr, 0)
+        # Store pixels as JSON string
+        row['pixels'] = json.dumps(winning_parameters['pixels'])
+        writer.writerow(row)
+
+# Load last winning parameters before initializing the game
+last_winner_type, last_winning_parameters, consecutive_wins = load_last_winning_parameters()
+
 # Function to initialize the game
 def initialize_game(winning_life_type=None, winning_parameters=None):
-    global plants, life_forms, life_form_examples, games_played
+    global plants, life_forms, life_form_examples, games_played, last_winner_type, consecutive_wins
     games_played += 1
 
     # Create sprite groups
@@ -591,6 +681,9 @@ def initialize_game(winning_life_type=None, winning_parameters=None):
                 temp_life_form.update_attributes()
                 attributes = temp_life_form.attributes.copy()
 
+            # Ensure colors are tuples
+            pixels = [(x, y, tuple(color)) for x, y, color in pixels]
+
             life_type_parameters[life_type] = {'pixels': pixels, 'attributes': attributes}
 
         # Create life forms with the stored parameters
@@ -615,12 +708,21 @@ def initialize_game(winning_life_type=None, winning_parameters=None):
         # **First Game: Initialize All Lifeform Types with Random Parameters**
         for life_type in life_types:
             example_life_form = None
-            # Randomize parameters for this life type
-            temp_life_form = LifeForm(life_type=life_type)
-            pixels = temp_life_form.generate_random_pixels()
-            temp_life_form.pixels = pixels
-            temp_life_form.update_attributes()
-            attributes = temp_life_form.attributes.copy()
+            if life_type == 'A' and last_winning_parameters is not None:
+                # Use the last winning parameters for Life Form A
+                pixels = copy.deepcopy(last_winning_parameters['pixels'])
+                attributes = copy.deepcopy(last_winning_parameters['attributes'])
+            else:
+                # Randomize parameters for this life type
+                temp_life_form = LifeForm(life_type=life_type)
+                pixels = temp_life_form.generate_random_pixels()
+                temp_life_form.pixels = pixels
+                temp_life_form.update_attributes()
+                attributes = temp_life_form.attributes.copy()
+
+            # Ensure colors are tuples
+            pixels = [(x, y, tuple(color)) for x, y, color in pixels]
+
             life_type_parameters[life_type] = {'pixels': pixels, 'attributes': attributes}
 
             # Create life forms with the stored parameters
@@ -642,8 +744,6 @@ def initialize_game(winning_life_type=None, winning_parameters=None):
 
 def adapt_attributes(winning_parameters, life_type):
     # **Removed: Adaptation Function as Only the Winning Attributes are Carried Over**
-    # Since only the winning lifeform's attributes and shape are carried over,
-    # we don't need to adapt other life types. This function is no longer necessary.
     pass
 
 def display_life_form_parameters():
@@ -703,7 +803,7 @@ def determine_quarter(position):
         return None  # Undefined
 
 # Function to draw boundaries with gaps
-def draw_boundary_with_gap(surface, width, height, header_height, gap_ratio=0.2, line_color=(200, 200, 200), line_width=2):
+def draw_boundary_with_gap(surface, width, height, header_height, gap_ratio=0.3, line_color=(200, 200, 200), line_width=2):
     global vertical_gap_start_y, vertical_gap_end_y, horizontal_gap_start_x, horizontal_gap_end_x
 
     # Vertical Boundary
@@ -754,182 +854,245 @@ def calculate_energy_metrics(life_forms):
         energy_metrics[life_type] = {'total': total_energy, 'average': average_energy}
     return energy_metrics
 
-# Initialize the game for the first time
-initialize_game()
-waiting_to_start = True
-start_time = pygame.time.get_ticks()
-waiting_for_restart = False
-winner_declared = False
-winner_screen_start_time = None
+def main():
+    global last_winner_type, consecutive_wins, last_winning_parameters
 
-# Plant respawn event
-PLANT_RESPAWN_EVENT = pygame.USEREVENT + 1
-pygame.time.set_timer(PLANT_RESPAWN_EVENT, PLANT_RESPAWN_TIME)
+    # Initialize the game for the first time
+    initialize_game()
+    waiting_to_start = True
+    start_time = pygame.time.get_ticks()
+    waiting_for_restart = False
+    winner_declared = False
+    winner_screen_start_time = None
 
-# Main game loop
-running = True
-while running:
-    clock.tick(60)  # Limit to 60 FPS
-    current_time = pygame.time.get_ticks()
+    # Plant respawn event
+    PLANT_RESPAWN_EVENT = pygame.USEREVENT + 1
+    pygame.time.set_timer(PLANT_RESPAWN_EVENT, PLANT_RESPAWN_TIME)
 
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            running = False
+    # Main game loop
+    running = True
+    while running:
+        clock.tick(60)  # Limit to 60 FPS
+        current_time = pygame.time.get_ticks()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            if waiting_to_start:
+                if event.type == pygame.KEYDOWN:
+                    waiting_to_start = False
+            elif waiting_for_restart:
+                if event.type == pygame.KEYDOWN:
+                    winner_declared = False
+                    waiting_for_restart = False
+                    initialize_game(winning_life_type=winner_type, winning_parameters=winning_parameters)
+                    waiting_to_start = True
+                    start_time = pygame.time.get_ticks()
+                    winner_screen_start_time = None
+            else:
+                # Handle game events
+                if event.type == PLANT_RESPAWN_EVENT:
+                    if len(plants) < MAX_PLANTS:
+                        plant = Plant()
+                        plants.add(plant)
+
         if waiting_to_start:
-            if event.type == pygame.KEYDOWN:
+            display_life_form_parameters()
+            # *** Automatically start the game after 10 seconds ***
+            if current_time - start_time >= 10000:
                 waiting_to_start = False
+        elif not waiting_for_restart and not winner_declared:
+            # Update life forms
+            for life_form in life_forms.copy():
+                life_form.update(plants, life_forms)
+                if not life_form.alive:
+                    life_forms.remove(life_form)
+
+            # Check if only one type of life form remains
+            life_types_remaining = set(lf.life_type for lf in life_forms)
+            if len(life_types_remaining) == 1 and len(life_forms) > 0:
+                winner_type = life_types_remaining.pop()
+                winner_declared = True
+                # Capture the winning life form's parameters
+                for life_form in life_forms:
+                    if life_form.life_type == winner_type:
+                        winning_life_form = life_form
+                        break
+                # Store the winning parameters
+                winning_parameters = {
+                    'pixels': winning_life_form.pixels,
+                    'attributes': winning_life_form.attributes
+                }
+                # Update last winner and consecutive wins
+                if last_winner_type == winner_type:
+                    consecutive_wins += 1
+                else:
+                    consecutive_wins = 1
+                    last_winner_type = winner_type
+                # Append winning parameters to CSV file
+                append_winning_parameters(winner_type, winning_parameters)
+                # Calculate average attributes of the winner
+                total_attributes = Counter()
+                num_winners = 0
+                for life_form in life_forms:
+                    if life_form.life_type == winner_type:
+                        total_attributes.update(life_form.attributes)
+                        num_winners += 1
+                # Calculate average attributes
+                average_attributes = {attr: total_attributes[attr] / num_winners for attr in total_attributes}
+                # Start timing the winner screen
+                winner_screen_start_time = current_time
+                # Display winner information
+                winner_message = f"The Winner Is Type {winner_type}!"
+                waiting_for_restart = True
+
         elif waiting_for_restart:
-            if event.type == pygame.KEYDOWN:
+            # *** Automatically restart the game after 10 seconds ***
+            if winner_screen_start_time and (current_time - winner_screen_start_time >= 10000):
                 winner_declared = False
                 waiting_for_restart = False
                 initialize_game(winning_life_type=winner_type, winning_parameters=winning_parameters)
                 waiting_to_start = True
                 start_time = pygame.time.get_ticks()
                 winner_screen_start_time = None
+
+        # Draw everything
+        if waiting_to_start:
+            pass
+        elif waiting_for_restart:
+            # Display the winner message and wait for keypress or 10 seconds
+            screen.fill(BACKGROUND_COLOR)
+            # Create a semi-transparent overlay
+            overlay = pygame.Surface((WIDTH, HEIGHT - HEADER_HEIGHT))
+            overlay.set_alpha(200)
+            overlay.fill((0, 0, 0))
+            screen.blit(overlay, (0, HEADER_HEIGHT))
+
+            # Display winner message
+            winner_text = LARGE_FONT.render(winner_message, True, (255, 255, 255))
+            winner_rect = winner_text.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 50))
+            screen.blit(winner_text, winner_rect)
+
+            # Display average attributes with colored text
+            attr_y = winner_rect.bottom + 20
+            for attr, value in average_attributes.items():
+                text_color = ATTRIBUTE_COLORS[attr]
+                attr_text = FONT.render(f"{attr}: {value:.2f}", True, text_color)
+                attr_rect = attr_text.get_rect(center=(WIDTH // 2, attr_y))
+                screen.blit(attr_text, attr_rect)
+                attr_y += 30
+
+            # Instruction to restart
+            instruction_text = FONT.render("Press any key to restart the game.", True, (255, 255, 255))
+            instruction_rect = instruction_text.get_rect(center=(WIDTH // 2, attr_y + 30))
+            screen.blit(instruction_text, instruction_rect)
         else:
-            # Handle game events
-            if event.type == PLANT_RESPAWN_EVENT:
-                if len(plants) < MAX_PLANTS:
-                    plant = Plant()
-                    plants.add(plant)
+            # Draw the game as usual
+            screen.fill(BACKGROUND_COLOR)
+            # Draw header
+            header_rect = pygame.Rect(0, 0, WIDTH, HEADER_HEIGHT)
+            pygame.draw.rect(screen, (50, 50, 50), header_rect)
 
-    if waiting_to_start:
-        display_life_form_parameters()
-        # *** Automatically start the game after 10 seconds ***
-        if current_time - start_time >= 10000:
-            waiting_to_start = False
-    elif not waiting_for_restart and not winner_declared:
-        # Update life forms
-        for life_form in life_forms.copy():
-            life_form.update(plants, life_forms)
-            if not life_form.alive:
-                life_forms.remove(life_form)
+            # Draw Quarter Boundaries with Gaps
+            draw_boundary_with_gap(screen, WIDTH, HEIGHT, HEADER_HEIGHT)
 
-        # Check if only one type of life form remains
-        life_types_remaining = set(lf.life_type for lf in life_forms)
-        if len(life_types_remaining) == 1 and len(life_forms) > 0:
-            winner_type = life_types_remaining.pop()
-            winner_declared = True
-            # Capture the winning life form's parameters
-            for life_form in life_forms:
-                if life_form.life_type == winner_type:
-                    winning_life_form = life_form
-                    break
-            # Store the winning parameters
-            winning_parameters = {
-                'pixels': winning_life_form.pixels,
-                'attributes': winning_life_form.attributes
-            }
-            # Calculate average attributes of the winner
-            total_attributes = Counter()
-            num_winners = 0
-            for life_form in life_forms:
-                if life_form.life_type == winner_type:
-                    total_attributes.update(life_form.attributes)
-                    num_winners += 1
-            # Calculate average attributes
-            average_attributes = {attr: total_attributes[attr] / num_winners for attr in total_attributes}
-            # Start timing the winner screen
-            winner_screen_start_time = current_time
-            # Display winner information
-            winner_message = f"The Winner Is Type {winner_type}!"
-            waiting_for_restart = True
+            # Calculate Energy Metrics
+            energy_metrics = calculate_energy_metrics(life_forms)
 
-    elif waiting_for_restart:
-        # *** Automatically restart the game after 10 seconds ***
-        if winner_screen_start_time and (current_time - winner_screen_start_time >= 10000):
-            winner_declared = False
-            waiting_for_restart = False
-            initialize_game(winning_life_type=winner_type, winning_parameters=winning_parameters)
-            waiting_to_start = True
-            start_time = pygame.time.get_ticks()
-            winner_screen_start_time = None
+            # Draw sprites
+            plants.draw(screen)
+            life_forms.draw(screen)
 
-    # Draw everything
-    if waiting_to_start:
-        pass
-    elif waiting_for_restart:
-        # Display the winner message and wait for keypress or 10 seconds
-        screen.fill(BACKGROUND_COLOR)
-        # Create a semi-transparent overlay
-        overlay = pygame.Surface((WIDTH, HEIGHT - HEADER_HEIGHT))
-        overlay.set_alpha(200)
-        overlay.fill((0, 0, 0))
-        screen.blit(overlay, (0, HEADER_HEIGHT))
+            # Draw games played counter in top right of header
+            games_played_text = FONT.render(f"Games Played: {games_played}", True, (255, 255, 255))
+            games_played_rect = games_played_text.get_rect()
+            games_played_rect.topright = (WIDTH - 20, 10)
+            screen.blit(games_played_text, games_played_rect)
 
-        # Display winner message
-        winner_text = LARGE_FONT.render(winner_message, True, (255, 255, 255))
-        winner_rect = winner_text.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 50))
-        screen.blit(winner_text, winner_rect)
+            # Display Last Winner
+            if last_winner_type is not None:
+                last_winner_text = FONT.render(f"Last Winner: {last_winner_type}", True, (255, 255, 255))
+                last_winner_rect = last_winner_text.get_rect()
+                last_winner_rect.topright = (WIDTH - 20, games_played_rect.bottom + 5)
+                screen.blit(last_winner_text, last_winner_rect)
 
-        # Display average attributes with colored text
-        attr_y = winner_rect.bottom + 20
-        for attr, value in average_attributes.items():
-            text_color = ATTRIBUTE_COLORS[attr]
-            attr_text = FONT.render(f"{attr}: {value:.2f}", True, text_color)
-            attr_rect = attr_text.get_rect(center=(WIDTH // 2, attr_y))
-            screen.blit(attr_text, attr_rect)
-            attr_y += 30
+                # Display Wins
+                wins_text = FONT.render(f"Wins: {consecutive_wins}", True, (255, 255, 255))
+                wins_rect = wins_text.get_rect()
+                wins_rect.topright = (WIDTH - 20, last_winner_rect.bottom + 5)
+                screen.blit(wins_text, wins_rect)
 
-        # Instruction to restart
-        instruction_text = FONT.render("Press any key to restart the game.", True, (255, 255, 255))
-        instruction_rect = instruction_text.get_rect(center=(WIDTH // 2, attr_y + 30))
-        screen.blit(instruction_text, instruction_rect)
-    else:
-        # Draw the game as usual
-        screen.fill(BACKGROUND_COLOR)
-        # Draw header
-        header_rect = pygame.Rect(0, 0, WIDTH, HEADER_HEIGHT)
-        pygame.draw.rect(screen, (50, 50, 50), header_rect)
+            # Calculate font height
+            font_height = FONT.get_height()
 
-        # Draw Quarter Boundaries with Gaps
-        draw_boundary_with_gap(screen, WIDTH, HEIGHT, HEADER_HEIGHT)
+            # Determine how many attributes per column
+            attributes_per_column = len(ATTRIBUTE_COLORS) // 2 + len(ATTRIBUTE_COLORS) % 2
 
-        # Calculate Energy Metrics
-        energy_metrics = calculate_energy_metrics(life_forms)
+            # Calculate total height required for the first column
+            total_column_height = attributes_per_column * font_height
 
-        # Draw sprites
-        plants.draw(screen)
-        life_forms.draw(screen)
+            # Calculate starting positions for the columns, moved 300 pixels to the right
+            start_y = max((HEADER_HEIGHT - total_column_height) // 2, 0)
+            column1_x = WIDTH // 2 - 100 + 300  # Adjust X position for the first column, moved 300 pixels to the right
+            column2_x = WIDTH // 2 + 100 + 300  # Adjust X position for the second column, moved 300 pixels to the right
 
-        # Draw games played counter in top right of header
-        games_played_text = FONT.render(f"Games Played: {games_played}", True, (255, 255, 255))
-        games_played_rect = games_played_text.get_rect()
-        games_played_rect.topright = (WIDTH - 20, 10)
-        screen.blit(games_played_text, games_played_rect)
+            # Render the first column
+            attribute_y_offset = start_y
+            for i, (attr, color) in enumerate(list(ATTRIBUTE_COLORS.items())[:attributes_per_column]):
+                # Create text for the attribute name with the associated color
+                attribute_text = FONT.render(attr.capitalize(), True, color)
+                attribute_rect = attribute_text.get_rect()
+                attribute_rect.centerx = column1_x  # Position in the first column, moved 300 pixels to the right
+                attribute_rect.y = attribute_y_offset
+                screen.blit(attribute_text, attribute_rect)
+                attribute_y_offset += font_height  # Increment Y offset by the font height
 
-        # Draw life form examples and energy metrics in header
-        x_offset = 50
-        for life_type, life_form in life_form_examples.items():
-            # Draw life form image
-            life_form_image = life_form.image
-            image_rect = life_form_image.get_rect()
-            image_rect.topleft = (x_offset, 10)
-            screen.blit(life_form_image, image_rect)
-            # Draw label
-            label = FONT.render(f"Type {life_type}", True, (255, 255, 255))
-            label_rect = label.get_rect()
-            label_rect.topleft = (x_offset, image_rect.bottom + 5)
-            screen.blit(label, label_rect)
+            # Render the second column
+            attribute_y_offset = start_y
+            for i, (attr, color) in enumerate(list(ATTRIBUTE_COLORS.items())[attributes_per_column:]):
+                # Create text for the attribute name with the associated color
+                attribute_text = FONT.render(attr.capitalize(), True, color)
+                attribute_rect = attribute_text.get_rect()
+                attribute_rect.centerx = column2_x  # Position in the second column, moved 300 pixels to the right
+                attribute_rect.y = attribute_y_offset
+                screen.blit(attribute_text, attribute_rect)
+                attribute_y_offset += font_height  # Increment Y offset by the font height
 
-            # Display Total and Average Energy
-            total_energy = energy_metrics[life_type]['total']
-            average_energy = energy_metrics[life_type]['average']
+            # Draw life form examples and energy metrics in header
+            x_offset = 50
+            for life_type, life_form in life_form_examples.items():
+                # Draw life form image
+                life_form_image = life_form.image
+                image_rect = life_form_image.get_rect()
+                image_rect.topleft = (x_offset, 10)
+                screen.blit(life_form_image, image_rect)
+                # Draw label
+                label = FONT.render(f"Type {life_type}", True, (255, 255, 255))
+                label_rect = label.get_rect()
+                label_rect.topleft = (x_offset, image_rect.bottom + 5)
+                screen.blit(label, label_rect)
 
-            # Render Total Energy
-            total_energy_text = FONT.render(f"Total Energy: {total_energy:.0f}", True, (255, 255, 255))
-            total_energy_rect = total_energy_text.get_rect()
-            total_energy_rect.topleft = (x_offset, label_rect.bottom + 5)
-            screen.blit(total_energy_text, total_energy_rect)
+                # Display Total and Average Energy
+                total_energy = energy_metrics[life_type]['total']
+                average_energy = energy_metrics[life_type]['average']
 
-            # Render Average Energy
-            average_energy_text = FONT.render(f"Avg Energy: {average_energy:.0f}", True, (255, 255, 255))
-            average_energy_rect = average_energy_text.get_rect()
-            average_energy_rect.topleft = (x_offset, total_energy_rect.bottom + 5)
-            screen.blit(average_energy_text, average_energy_rect)
+                # Render Total Energy
+                total_energy_text = FONT.render(f"Total Energy: {total_energy:.0f}", True, (255, 255, 255))
+                total_energy_rect = total_energy_text.get_rect()
+                total_energy_rect.topleft = (x_offset, label_rect.bottom + 5)
+                screen.blit(total_energy_text, total_energy_rect)
 
-            x_offset += image_rect.width + 150  # Space between examples
+                # Render Average Energy
+                average_energy_text = FONT.render(f"Avg Energy: {average_energy:.0f}", True, (255, 255, 255))
+                average_energy_rect = average_energy_text.get_rect()
+                average_energy_rect.topleft = (x_offset, total_energy_rect.bottom + 5)
+                screen.blit(average_energy_text, average_energy_rect)
 
-    pygame.display.flip()
+                x_offset += image_rect.width + 150  # Space between examples
 
-pygame.quit()
+        pygame.display.flip()
+
+    pygame.quit()
+
+if __name__ == "__main__":
+    main()
